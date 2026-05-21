@@ -1,0 +1,18 @@
+.env
+.env.*
+!.env.example
+dist/
+__pycache__/
+*.pyc
+node_modules/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# 민감정보 — 배포 URL, 이메일 포함
+config.js
+Config.gs
+
+# 로컬 데이터
+*.csv

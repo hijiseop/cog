@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title></title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+      margin: 0; padding: 16px; background: #f4f5f7; color: #1a1a1a;
+    }
+    h1 { font-size: 20px; text-align: center; margin: 6px 0 10px; }
+
+    .file-bar {
+      display: flex; align-items: center; gap: 8px;
+      background: #fff; border-radius: 10px; padding: 10px 14px;
+      margin-bottom: 12px; font-size: 14px;
+    }
+    .file-bar span { flex: 1; color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-btn {
+      padding: 7px 14px; border: 1px solid #bbb; border-radius: 6px;
+      background: #f5f5f5; font-size: 13px; cursor: pointer; white-space: nowrap;
+    }
+    .file-btn.primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+
+    .modes {
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      gap: 8px; margin-bottom: 16px;
+    }
+    .mode-btn {
+      padding: 20px 0; font-size: 17px; font-weight: 700;
+      border: 2px solid #d0d0d0; border-radius: 12px;
+      background: #fff; cursor: pointer;
+    }
+    .mode-btn.active { color: #fff; border-color: transparent; }
+    .m-in.active     { background: #2e7d32; }
+    .m-out.active    { background: #c62828; }
+    .m-loan.active   { background: #1565c0; }
+    .m-return.active { background: #6a1b9a; }
+
+    .card { background: #fff; border-radius: 12px; padding: 16px; }
+    label { display: block; font-size: 14px; font-weight: 600; margin: 12px 0 4px; }
+    input, textarea {
+      width: 100%; padding: 12px; font-size: 16px;
+      border: 1px solid #ccc; border-radius: 8px;
+    }
+    .btn-main {
+      width: 100%; margin-top: 18px; padding: 16px;
+      font-size: 18px; font-weight: 700; color: #fff;
+      background: #1a1a1a; border: none; border-radius: 10px; cursor: pointer;
+    }
+    .btn-main:disabled { opacity: 0.4; cursor: not-allowed; }
+    .hide { display: none; }
+    .msg {
+      margin-top: 14px; padding: 12px; border-radius: 8px;
+      font-size: 15px; text-align: center; line-height: 1.6;
+    }
+    .msg.ok  { background: #e8f5e9; color: #2e7d32; }
+    .msg.err { background: #ffebee; color: #c62828; }
+  </style>
+</head>
+<body>
+  <h1 id="appTitle">📦</h1>
+
+  <div class="file-bar">
+    <span id="fileStatus">📂 폴더를 선택하세요</span>
+    <button class="file-btn primary hide" id="resumeBtn" onclick="resumeFile()">이어서 열기</button>
+    <button class="file-btn primary" onclick="openDir()">폴더 선택</button>
+    <button class="file-btn" onclick="resyncAll()">전체 재동기화</button>
+  </div>
+
+  <div class="modes">
+    <button class="mode-btn m-in active" onclick="setMode('입고')">입고</button>
+    <button class="mode-btn m-out"       onclick="setMode('출고')">출고</button>
+    <button class="mode-btn m-loan"      onclick="setMode('대여')">대여</button>
+    <button class="mode-btn m-return"    onclick="setMode('반납')">반납</button>
+  </div>
+
+  <div class="card">
+    <label>물품명</label>
+    <input id="item" list="itemList" placeholder="예: 면장갑" autocomplete="off">
+    <datalist id="itemList"></datalist>
+
+    <label>수량</label>
+    <input id="qty" type="number" inputmode="numeric" min="1" placeholder="예: 10">
+
+    <label>담당자</label>
+    <input id="handler" placeholder="이름" autocomplete="off">
+
+    <div id="loanFields" class="hide">
+      <label>대여자</label>
+      <input id="borrower" placeholder="이름" autocomplete="off">
+      <label>반납 예정일</label>
+      <input id="dueDate" type="date">
+    </div>
+
+    <div id="returnFields" class="hide">
+      <label>반납자</label>
+      <input id="returner" placeholder="이름" autocomplete="off">
+    </div>
+
+    <label>메모 (선택)</label>
+    <textarea id="memo" rows="2" placeholder="특이사항"></textarea>
+
+    <button class="btn-main" id="submitBtn" onclick="submitTx()">입고 기록하기</button>
+    <div id="msg"></div>
+  </div>
+
+  <script src="config.js"></script>
+  <script>
+
+    var dirHandle    = null;
+    var transactions = [];
+    var inventory    = {};
+
+    var mode    = '입고';
+    var modeMap = { '입고':'m-in', '출고':'m-out', '대여':'m-loan', '반납':'m-return' };
+    var CSV_LABELS = ['날짜시각','구분','물품명','수량','담당자','대여자','반납예정일','메모','동기화','id'];
+    var TX_PROPS   = ['timestamp','type','item','qty','handler','borrower','dueDate','memo','synced','localId'];
+
+    // ── IndexedDB — 파일 핸들 기억 ───────────────────────
+    function openIDB() {
+      return new Promise(function(resolve, reject) {
+        var req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = function() { req.result.createObjectStore('handles'); };
+        req.onsuccess = function() { resolve(req.result); };
+        req.onerror   = reject;
+      });
+    }
+    async function saveHandle(h) {
+      var db = await openIDB();
+      db.transaction('handles', 'readwrite').objectStore('handles').put(h, 'main');
+    }
+    async function getSavedHandle() {
+      var db = await openIDB();
+      return new Promise(function(resolve) {
+        var req = db.transaction('handles', 'readonly').objectStore('handles').get('main');
+        req.onsuccess = function() { resolve(req.result || null); };
+        req.onerror   = function() { resolve(null); };
+      });
+    }
+
+    // 앱 시작 시 저장된 핸들 확인 — 권한 있으면 자동 로드
+    window.addEventListener('load', async function() {
+      var h = await getSavedHandle();
+      if (!h) return;
+      var perm = await h.queryPermission({ mode: 'readwrite' });
+      if (perm === 'granted') {
+        await applyDir(h);
+      } else {
+        document.getElementById('resumeBtn').classList.remove('hide');
+      }
+    });
+
+    async function resumeFile() {
+      var h = await getSavedHandle();
+      if (!h) return;
+      if (await h.requestPermission({ mode: 'readwrite' }) === 'granted') {
+        await applyDir(h);
+        document.getElementById('resumeBtn').classList.add('hide');
+      }
+    }
+
+    async function applyDir(h) {
+      dirHandle = h;
+      try {
+        var fh   = await h.getFileHandle(FILE_TX, { create: true });
+        var text = await (await fh.getFile()).text();
+        loadCSV(text);
+      } catch(e) {}
+      document.getElementById('fileStatus').innerText = '📁 ' + h.name;
+      document.getElementById('submitBtn').disabled = false;
+    }
+
+    // ── 폴더 선택 ────────────────────────────────────────
+    async function openDir() {
+      try {
+        var h = await window.showDirectoryPicker({ mode: 'readwrite' });
+        await saveHandle(h);
+        await applyDir(h);
+        document.getElementById('resumeBtn').classList.add('hide');
+      } catch(e) {}
+    }
+
+    async function writeFile() {
+      if (!dirHandle) return;
+      try {
+        var txFh  = await dirHandle.getFileHandle(FILE_TX, { create: true });
+        var w1    = await txFh.createWritable();
+        await w1.write('﻿' + buildCSV());
+        await w1.close();
+
+        var invFh = await dirHandle.getFileHandle(FILE_INV, { create: true });
+        var w2    = await invFh.createWritable();
+        await w2.write('﻿' + buildInventoryCSV());
+        await w2.close();
+      } catch(e) {}
+    }
+
+    // ── CSV 파싱 / 생성 ──────────────────────────────────
+    function loadCSV(text) {
+      text = text.replace(/^﻿/, '');
+      var lines = text.trim().split(/\r?\n/);
+      if (lines.length <= 1) { transactions = []; inventory = {}; return; }
+      transactions = lines.slice(1).map(function(line) {
+        var vals = splitCSV(line);
+        var tx   = {};
+        TX_PROPS.forEach(function(k, i) { tx[k] = (vals[i] || '').trim(); });
+        tx.qty    = Number(tx.qty) || 0;
+        tx.synced = (tx.synced === 'true');
+        tx.localId = tx.localId || genId();
+        return tx;
+      }).filter(function(tx) { return tx.item; });
+      inventory = calcInventory(transactions);
+      updateItemList();
+    }
+
+    function buildInventoryCSV() {
+      var map = {};
+      transactions.forEach(function(tx) {
+        if (!tx.item) return;
+        if (!map[tx.item]) map[tx.item] = { in: 0, out: 0, loan: 0 };
+        if (tx.type === '입고' || tx.type === '반납') map[tx.item].in  += tx.qty;
+        else if (tx.type === '출고')                  map[tx.item].out += tx.qty;
+        else if (tx.type === '대여')                  map[tx.item].loan += tx.qty;
+      });
+      var rows = [['물품명', '총입고', '총출고', '대여중', '현재고'].join(',')];
+      Object.keys(map).sort().forEach(function(item) {
+        var m = map[item];
+        var stock = m.in - m.out - m.loan;
+        rows.push([csvCell(item), m.in, m.out, m.loan, stock].join(','));
+      });
+      return rows.join('\r\n');
+    }
+
+    function buildCSV() {
+      var rows = [CSV_LABELS.join(',')];
+      transactions.forEach(function(tx) {
+        rows.push(TX_PROPS.map(function(k) { return csvCell(tx[k]); }).join(','));
+      });
+      return rows.join('\r\n');
+    }
+
+    function csvCell(val) {
+      var s = String(val == null ? '' : val);
+      if (/[,"\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    }
+
+    function splitCSV(line) {
+      var result = [], cur = '', inQ = false;
+      for (var i = 0; i < line.length; i++) {
+        var c = line[i];
+        if (inQ) {
+          if (c === '"' && line[i+1] === '"') { cur += '"'; i++; }
+          else if (c === '"') inQ = false;
+          else cur += c;
+        } else {
+          if (c === '"') inQ = true;
+          else if (c === ',') { result.push(cur); cur = ''; }
+          else cur += c;
+        }
+      }
+      result.push(cur);
+      return result;
+    }
+
+    function calcInventory(txList) {
+      var inv = {};
+      txList.forEach(function(tx) {
+        inv[tx.item] = inv[tx.item] || 0;
+        if (tx.type === '입고' || tx.type === '반납') inv[tx.item] += tx.qty;
+        if (tx.type === '출고' || tx.type === '대여') inv[tx.item] -= tx.qty;
+        inv[tx.item] = Math.max(0, inv[tx.item]);
+      });
+      return inv;
+    }
+
+    // ── 모드 전환 ─────────────────────────────────────────
+    function setMode(m) {
+      mode = m;
+      document.querySelectorAll('.mode-btn').forEach(function(b) { b.classList.remove('active'); });
+      document.querySelector('.' + modeMap[m]).classList.add('active');
+      document.getElementById('loanFields').classList.toggle('hide', m !== '대여');
+      document.getElementById('returnFields').classList.toggle('hide', m !== '반납');
+      document.getElementById('msg').innerHTML = '';
+      document.getElementById('submitBtn').innerText = m + ' 기록하기';
+    }
+
+    // ── 거래 기록 ─────────────────────────────────────────
+    function submitTx() {
+      var item    = document.getElementById('item').value.trim();
+      var qty     = Number(document.getElementById('qty').value);
+      var handler = document.getElementById('handler').value.trim();
+
+      if (!item)    { showMsg('err', '물품명을 입력하세요.'); return; }
+      if (qty <= 0) { showMsg('err', '수량을 1 이상 입력하세요.'); return; }
+
+      if (mode === '출고' || mode === '대여') {
+        var cur = inventory[item] || 0;
+        if (qty > cur) {
+          showMsg('err', '"' + item + '" 현재고(' + cur + '개)보다 많습니다.');
+          return;
+        }
+      }
+
+      var tx = {
+        localId:   genId(),
+        timestamp: new Date().toISOString(),
+        type:      mode,
+        item:      item,
+        qty:       qty,
+        handler:   handler,
+        borrower:  mode === '반납'
+                     ? document.getElementById('returner').value.trim()
+                     : document.getElementById('borrower').value.trim(),
+        dueDate:   document.getElementById('dueDate').value,
+        memo:      document.getElementById('memo').value.trim(),
+        synced:    false
+      };
+
+      if (mode === '입고' || mode === '반납') inventory[item] = Math.max(0, (inventory[item] || 0) + qty);
+      if (mode === '출고' || mode === '대여') inventory[item] = Math.max(0, (inventory[item] || 0) - qty);
+
+      transactions.push(tx);
+      writeFile();
+      updateItemList();
+      clearForm();
+      showMsg('ok', '✅ ' + item + ' ' + mode + ' ' + qty + '개  현재고: ' + (inventory[item] || 0) + '개');
+      trySend();
+    }
+
+    // ── 서버 전송 ─────────────────────────────────────────
+    function resyncAll() {
+      if (!transactions.length) { showMsg('err', '기록된 데이터가 없습니다.'); return; }
+      if (!confirm('Sheets를 오프라인 데이터로 완전히 교체합니다.\n계속하시겠습니까?')) return;
+      showMsg('ok', '🔄 동기화 중...');
+      fetch(SYNC_URL, {
+        method: 'POST',
+        body: JSON.stringify({ reset: true, transactions: transactions })
+      })
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (!data.ok) { showMsg('err', '❌ 오류: ' + (data.error || '')); return; }
+        transactions.forEach(function(t) { t.synced = true; });
+        writeFile();
+        showMsg('ok', '☁️ 전체 동기화 완료 (' + transactions.length + '건)');
+      })
+      .catch(function(err) { showMsg('err', '❌ 네트워크 오류: ' + err); });
+    }
+
+    function trySend() {
+      var pending = transactions.filter(function(t) { return !t.synced; });
+      if (!pending.length) return;
+
+      fetch(SYNC_URL, { method: 'POST', body: JSON.stringify(pending) })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+          if (!data.ok) {
+            showMsg('err', '❌ 서버 오류: ' + (data.error || '알 수 없음'));
+            return;
+          }
+          var ok = {};
+          (data.results || []).forEach(function(r) {
+            if (r.ok) ok[r.localId] = true;
+            else showMsg('err', '❌ 항목 오류: ' + (r.error || '알 수 없음'));
+          });
+          transactions.forEach(function(t) { if (ok[t.localId]) t.synced = true; });
+          writeFile();
+          showMsg('ok', '☁️ 동기화 완료 (' + Object.keys(ok).length + '건)');
+        })
+        .catch(function(err) {
+          showMsg('err', '❌ 네트워크 오류: ' + err);
+        });
+    }
+
+    // ── 유틸 ─────────────────────────────────────────────
+    function updateItemList() {
+      var dl = document.getElementById('itemList');
+      dl.innerHTML = Object.keys(inventory).map(function(name) {
+        return '<option value="' + name.replace(/"/g, '&quot;') + '">';
+      }).join('');
+    }
+
+    function genId() {
+      return Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+    }
+    function showMsg(type, text) {
+      var m = document.getElementById('msg');
+      m.className = 'msg ' + type; m.innerText = text;
+    }
+    function clearForm() {
+      ['item','qty','handler','borrower','dueDate','returner','memo'].forEach(function(id) {
+        document.getElementById(id).value = '';
+      });
+    }
+
+    document.title = APP_TITLE;
+    document.getElementById('appTitle').innerText = '📦 ' + APP_TITLE;
+    document.getElementById('submitBtn').disabled = true;
+  </script>
+</body>
+</html>

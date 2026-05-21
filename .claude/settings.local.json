@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 5 node server/index.js)",
+      "Bash(node --input-type=module)",
+      "Bash(node *)",
+      "Bash(start *)"
+    ]
+  }
+}
