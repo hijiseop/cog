@@ -6,6 +6,8 @@ Google Apps Script 기반 창고 물품 입출고·대여 관리 앱.
 
 `Config.gs` 파일을 직접 만들어야 합니다 (`.gitignore`로 제외되어 있음).
 
+`Config.example.gs`를 복사해 `Config.gs`로 저장 후 값을 입력하세요.
+
 ```js
 // Config.gs
 const APP_TITLE        = '창고 물품 관리 대장';   // 앱 제목
